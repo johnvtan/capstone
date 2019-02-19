@@ -10,6 +10,7 @@
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/filters/extract_indices.h>
+#include <pcl/features/normal_3d.h>
 
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
@@ -17,6 +18,8 @@ ros::Publisher filtered_pointcloud_pub;
 pcl::VoxelGrid<pcl::PCLPointCloud2> filter;
 pcl::SACSegmentation<pcl::PointXYZ> seg;
 pcl::ExtractIndices<pcl::PointXYZ> extract;
+pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normal_estimator;
+pcl::search::KdTree<pcl::PointXYZ>::Ptr kd_tree(new pcl::search::KdTree<pcl::PointXYZ>());
 
 void pointcloud_callback(const PointCloud::ConstPtr& msg) {
     PointCloud::Ptr cloud_filtered(new PointCloud);
@@ -37,8 +40,9 @@ void pointcloud_callback(const PointCloud::ConstPtr& msg) {
     int num_points = (int)cloud_filtered->points.size();
     PointCloud::Ptr removed(new PointCloud);
     PointCloud::Ptr plane(new PointCloud);
+    pcl::PointCloud<pcl::Normal>::Ptr plane_normals(new pcl::PointCloud<pcl::Normal>());
     PointCloud::Ptr all_planar(new PointCloud);
-    while (cloud_filtered->points.size() > 0.7 * num_points) {
+    while (cloud_filtered->points.size() > 0.3 * num_points) {
         seg.setInputCloud(cloud_filtered);
         seg.segment(*inliers, *coefficients);
         if (inliers->indices.size() == 0) {
@@ -50,8 +54,33 @@ void pointcloud_callback(const PointCloud::ConstPtr& msg) {
         extract.setNegative(false);
         extract.filter(*plane);
 
-        // concatenate all planar parts of pointcloud
-        *all_planar += *plane;
+        // TODO - filter out planar segments by normal vector. The normal should point directly toward/away from the camera
+        normal_estimator.setInputCloud(plane);
+        normal_estimator.setSearchMethod(kd_tree);
+
+        // What's a good search radius? Too small = lots of NaN values
+        normal_estimator.setRadiusSearch(10.0);
+        normal_estimator.compute(*plane_normals);
+
+        // plane_normals contains a normal vector for every point in the cloud
+        // try average over the entire cloud
+        pcl::CentroidPoint<pcl::Normal> avg;
+        for (int i = 0; i < plane_normals->points.size(); i++) {
+            avg.add(plane_normals->points[i]);
+        }
+        pcl::Normal surface_normal;
+        avg.get(surface_normal);
+        std::cout << surface_normal.normal_x << std::endl;
+
+        // try filtering by planes w/ normals close to (0, 1, 0)?
+        // normal.normal_x, normal.normal_y, normal.normal_z
+        if ((surface_normal.normal_x > -0.02 && surface_normal.normal_x < 0.02) &&
+            (surface_normal.normal_y > 0.98 && surface_normal.normal_y < 1.02) &&
+            (surface_normal.normal_z > -0.02 && surface_normal.normal_z < 0.02)) {
+
+            // add this plane to all planes
+            *all_planar += *plane;
+        }
 
         extract.setNegative(true);
         extract.filter(*removed);
