@@ -70,15 +70,18 @@ void pointcloud_callback(const PointCloud::ConstPtr& msg) {
         }
         pcl::Normal surface_normal;
         avg.get(surface_normal);
-        std::cout << surface_normal.normal_x << std::endl;
+        //std::cout << surface_normal << std::endl;
 
-        // try filtering by planes w/ normals close to (0, 1, 0)?
+        // try filtering by planes w/ normals close to (0, 0, 1) or (0, 0, -1)?
+        // Z axis points towards/away from viewpoint
         // normal.normal_x, normal.normal_y, normal.normal_z
-        if ((surface_normal.normal_x > -0.02 && surface_normal.normal_x < 0.02) &&
-            (surface_normal.normal_y > 0.98 && surface_normal.normal_y < 1.02) &&
-            (surface_normal.normal_z > -0.02 && surface_normal.normal_z < 0.02)) {
+        // TODO - figure out the normal vector of planes pointing towards the viewpoint
+        if ((surface_normal.normal_x > -0.3 && surface_normal.normal_x < 0.3) &&
+            (surface_normal.normal_y > -0.3 && surface_normal.normal_y < 0.3) &&
+            (surface_normal.normal_z > -1.2 && surface_normal.normal_z < -0.8)) {
 
             // add this plane to all planes
+            std::cout << "good" << std::endl;
             *all_planar += *plane;
         }
 
