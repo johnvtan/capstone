@@ -1,34 +1,48 @@
-#include <ros/ros.h>
+#include <pcl_test/plane_segmentation.h>
 
-#include <pcl_ros/point_cloud.h>
-#include <pcl_conversions/pcl_conversions.h>
+int main(int argc, char **argv) {
+    ros::init(argc, argv, "plane_segmentation_node");
+    PlaneSegmentation plane_segmenter;
+    plane_segmenter.run();
+    return 0;
+}
 
-#include <pcl/point_types.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/ModelCoefficients.h>
-#include <pcl/sample_consensus/method_types.h>
-#include <pcl/sample_consensus/model_types.h>
-#include <pcl/segmentation/sac_segmentation.h>
-#include <pcl/filters/extract_indices.h>
-#include <pcl/features/normal_3d.h>
+PlaneSegmentation::PlaneSegmentation(void) : 
+    nh(), 
+    kd_tree(new pcl::search::KdTree<pcl::PointXYZ>()) 
+{
+    // TODO - boost shit to bind class to callback
+    pointcloud_sub = nh.subscribe<PointCloud>("/guidance/points2", 1, &PlaneSegmentation::pointcloud_callback, this);
+    plane_pointcloud_pub = nh.advertise<PointCloud>("/guidance/filtered_points", 1);
 
-typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
+    // voxel filter settings
+    voxel_filter.setLeafSize(0.1f, 0.1f, 0.1f);
 
-ros::Publisher filtered_pointcloud_pub;
-pcl::VoxelGrid<pcl::PCLPointCloud2> filter;
-pcl::SACSegmentation<pcl::PointXYZ> seg;
-pcl::ExtractIndices<pcl::PointXYZ> extract;
-pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normal_estimator;
-pcl::search::KdTree<pcl::PointXYZ>::Ptr kd_tree(new pcl::search::KdTree<pcl::PointXYZ>());
+    // plane segmentation settings
+    plane_segmenter.setOptimizeCoefficients(true);
+    plane_segmenter.setModelType(pcl::SACMODEL_PLANE);
+    plane_segmenter.setMethodType(pcl::SAC_RANSAC);
+    plane_segmenter.setMaxIterations(1000);
+    plane_segmenter.setDistanceThreshold(0.1f);
+}
 
-void pointcloud_callback(const PointCloud::ConstPtr& msg) {
+PlaneSegmentation::~PlaneSegmentation(void) {
+
+}
+
+void PlaneSegmentation::run(void) {
+    ros::spin();
+}
+
+void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg) 
+{
     PointCloud::Ptr cloud_filtered(new PointCloud);
     pcl::PCLPointCloud2::Ptr cloud2(new pcl::PCLPointCloud2), filtered_cloud2(new pcl::PCLPointCloud2);
     pcl::toPCLPointCloud2(*msg, *cloud2);
 
     // downsample cloud using voxel filter
-    filter.setInputCloud(cloud2);
-    filter.filter(*filtered_cloud2);
+    voxel_filter.setInputCloud(cloud2);
+    voxel_filter.filter(*filtered_cloud2);
 
     // convert to PointCloud
     pcl::fromPCLPointCloud2(*filtered_cloud2, *cloud_filtered);
@@ -42,17 +56,18 @@ void pointcloud_callback(const PointCloud::ConstPtr& msg) {
     PointCloud::Ptr plane(new PointCloud);
     pcl::PointCloud<pcl::Normal>::Ptr plane_normals(new pcl::PointCloud<pcl::Normal>());
     PointCloud::Ptr all_planar(new PointCloud);
+    std::cout << "Nearest (?) depth is: " << cloud_filtered->points.at(0).z << std::endl;
     while (cloud_filtered->points.size() > 0.3 * num_points) {
-        seg.setInputCloud(cloud_filtered);
-        seg.segment(*inliers, *coefficients);
+        plane_segmenter.setInputCloud(cloud_filtered);
+        plane_segmenter.segment(*inliers, *coefficients);
         if (inliers->indices.size() == 0) {
             ROS_WARN("Could not find plane in this model");
             break;
         }
-        extract.setInputCloud(cloud_filtered);
-        extract.setIndices(inliers);
-        extract.setNegative(false);
-        extract.filter(*plane);
+        extracter.setInputCloud(cloud_filtered);
+        extracter.setIndices(inliers);
+        extracter.setNegative(false);
+        extracter.filter(*plane);
 
         // TODO - filter out planar segments by normal vector. The normal should point directly toward/away from the camera
         normal_estimator.setInputCloud(plane);
@@ -76,40 +91,23 @@ void pointcloud_callback(const PointCloud::ConstPtr& msg) {
         // Z axis points towards/away from viewpoint
         // normal.normal_x, normal.normal_y, normal.normal_z
         // TODO - figure out the normal vector of planes pointing towards the viewpoint
-        if ((surface_normal.normal_x > -0.3 && surface_normal.normal_x < 0.3) &&
-            (surface_normal.normal_y > -0.3 && surface_normal.normal_y < 0.3) &&
-            (surface_normal.normal_z > -1.2 && surface_normal.normal_z < -0.8)) {
+        if ((surface_normal.normal_x > -0.5 && surface_normal.normal_x < 0.5) &&
+            (surface_normal.normal_y > -0.5 && surface_normal.normal_y < 0.5)) {
+            if ((surface_normal.normal_z > -1.5 && surface_normal.normal_z < -0.5) ||
+                (surface_normal.normal_z > 0.5 && surface_normal.normal_z < 1.5)) {
 
-            // add this plane to all planes
-            std::cout << "good" << std::endl;
-            *all_planar += *plane;
+                std::cout << "good" << std::endl;
+                // add this plane to all planes
+                *all_planar += *plane;
+            }
         }
 
-        extract.setNegative(true);
-        extract.filter(*removed);
+        extracter.setNegative(true);
+        extracter.filter(*removed);
         cloud_filtered.swap(removed);
     }
 
     all_planar->header.frame_id = "guidance";
     pcl_conversions::toPCL(ros::Time::now(), all_planar->header.stamp);
-    filtered_pointcloud_pub.publish(all_planar);
-}
-
-int main(int argc, char **argv) {
-    ros::init(argc, argv, "plane_segmentation_node");
-    ros::NodeHandle nh;
-    ros::Subscriber sub = nh.subscribe<PointCloud>("/guidance/points2", 1, pointcloud_callback);
-    filtered_pointcloud_pub = nh.advertise<PointCloud>("/guidance/filtered_points", 1);
-
-    // voxel filter settings
-    filter.setLeafSize(0.1f, 0.1f, 0.1f);
-
-    // plane segmentation settings
-    seg.setOptimizeCoefficients(true);
-    seg.setModelType(pcl::SACMODEL_PLANE);
-    seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setMaxIterations(1000);
-    seg.setDistanceThreshold(0.1f);
-    ros::spin();
-    return 0;
+    plane_pointcloud_pub.publish(all_planar);
 }

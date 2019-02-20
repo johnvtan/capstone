@@ -18,7 +18,7 @@ catkin_package(
 #  DEPENDS system_lib
 )
 include_directories(
-# include
+  include
   ${PCL_INCLUDE_DIRS}
   ${catkin_INCLUDE_DIRS}
 )
