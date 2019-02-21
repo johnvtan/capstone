@@ -11,6 +11,7 @@ PlaneSegmentation::PlaneSegmentation(void) :
     nh(), 
     kd_tree(new pcl::search::KdTree<pcl::PointXYZ>()) 
 {
+    new_pointcloud = false;
     // TODO - boost shit to bind class to callback
     pointcloud_sub = nh.subscribe<PointCloud>("/guidance/points2", 1, &PlaneSegmentation::pointcloud_callback, this);
     plane_pointcloud_pub = nh.advertise<PointCloud>("/guidance/filtered_points", 1);
@@ -20,7 +21,9 @@ PlaneSegmentation::PlaneSegmentation(void) :
 
     // plane segmentation settings
     plane_segmenter.setOptimizeCoefficients(true);
-    plane_segmenter.setModelType(pcl::SACMODEL_PLANE);
+    plane_segmenter.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
+    plane_segmenter.setAxis(Eigen::Vector3f(0.0f, 0.0f, 1.0f));
+    plane_segmenter.setEpsAngle(0.1f); // 15 degrees in radians
     plane_segmenter.setMethodType(pcl::SAC_RANSAC);
     plane_segmenter.setMaxIterations(1000);
     plane_segmenter.setDistanceThreshold(0.1f);
@@ -56,8 +59,8 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
     PointCloud::Ptr plane(new PointCloud);
     pcl::PointCloud<pcl::Normal>::Ptr plane_normals(new pcl::PointCloud<pcl::Normal>());
     PointCloud::Ptr all_planar(new PointCloud);
-    std::cout << "Nearest (?) depth is: " << cloud_filtered->points.at(0).z << std::endl;
-    while (cloud_filtered->points.size() > 0.3 * num_points) {
+    int plane_count = 0;
+    while (cloud_filtered->points.size() > 0.5 * num_points) {
         plane_segmenter.setInputCloud(cloud_filtered);
         plane_segmenter.segment(*inliers, *coefficients);
         if (inliers->indices.size() == 0) {
@@ -70,6 +73,7 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
         extracter.filter(*plane);
 
         // TODO - filter out planar segments by normal vector. The normal should point directly toward/away from the camera
+        normal_estimator.setViewPoint(0.0f, 0.0f, 0.0f);
         normal_estimator.setInputCloud(plane);
         normal_estimator.setSearchMethod(kd_tree);
 
@@ -85,12 +89,22 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
         }
         pcl::Normal surface_normal;
         avg.get(surface_normal);
-        //std::cout << surface_normal << std::endl;
 
         // try filtering by planes w/ normals close to (0, 0, 1) or (0, 0, -1)?
         // Z axis points towards/away from viewpoint
         // normal.normal_x, normal.normal_y, normal.normal_z
         // TODO - figure out the normal vector of planes pointing towards the viewpoint
+        /*
+        float abs_x = std::abs(surface_normal.normal_x);
+        float abs_y = std::abs(surface_normal.normal_y);
+        float abs_z = std::abs(surface_normal.normal_z);
+        std::cout << abs_x << " " << abs_y << " " << abs_z << std::endl;
+        std::cout << "-------------------------------------------------------" << std::endl;
+        if (abs_x < 0.2 && abs_y < 0.2 && abs_z > 0.8) {
+            *all_planar += *plane;
+        }
+        */
+        /*
         if ((surface_normal.normal_x > -0.5 && surface_normal.normal_x < 0.5) &&
             (surface_normal.normal_y > -0.5 && surface_normal.normal_y < 0.5)) {
             if ((surface_normal.normal_z > -1.5 && surface_normal.normal_z < -0.5) ||
@@ -101,12 +115,18 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
                 *all_planar += *plane;
             }
         }
+        */
+        
+        std::cout << plane->points.size() << std::endl;
+        if (plane->points.size() > 200) {
+            *all_planar += *plane;
+        }
 
         extracter.setNegative(true);
         extracter.filter(*removed);
         cloud_filtered.swap(removed);
     }
-
+    std::cout << "-----------------------------------Plane count is: " << plane_count << std::endl;
     all_planar->header.frame_id = "guidance";
     pcl_conversions::toPCL(ros::Time::now(), all_planar->header.stamp);
     plane_pointcloud_pub.publish(all_planar);
