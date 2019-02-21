@@ -1,6 +1,8 @@
 #include <pcl_test/plane_segmentation.h>
+#include <stdlib.h>
 
 int main(int argc, char **argv) {
+    srand(100);
     ros::init(argc, argv, "plane_segmentation_node");
     PlaneSegmentation plane_segmenter;
     plane_segmenter.run();
@@ -11,10 +13,10 @@ PlaneSegmentation::PlaneSegmentation(void) :
     nh(), 
     kd_tree(new pcl::search::KdTree<pcl::PointXYZ>()) 
 {
-    new_pointcloud = false;
     // TODO - boost shit to bind class to callback
     pointcloud_sub = nh.subscribe<PointCloud>("/guidance/points2", 1, &PlaneSegmentation::pointcloud_callback, this);
     plane_pointcloud_pub = nh.advertise<PointCloud>("/guidance/filtered_points", 1);
+    colored_plane_pub = nh.advertise<pcl::PointCloud<pcl::PointXYZRGB>>("/guidance/planes_colored", 1);
 
     // voxel filter settings
     voxel_filter.setLeafSize(0.1f, 0.1f, 0.1f);
@@ -23,10 +25,14 @@ PlaneSegmentation::PlaneSegmentation(void) :
     plane_segmenter.setOptimizeCoefficients(true);
     plane_segmenter.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
     plane_segmenter.setAxis(Eigen::Vector3f(0.0f, 0.0f, 1.0f));
-    plane_segmenter.setEpsAngle(0.1f); // 15 degrees in radians
+    plane_segmenter.setEpsAngle(0.17f); // 15 degrees in radians
     plane_segmenter.setMethodType(pcl::SAC_RANSAC);
     plane_segmenter.setMaxIterations(1000);
     plane_segmenter.setDistanceThreshold(0.1f);
+
+    for (int i = 0; i < 100; i++) {
+        colors[i] = rand();
+    }
 }
 
 PlaneSegmentation::~PlaneSegmentation(void) {
@@ -59,6 +65,9 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
     PointCloud::Ptr plane(new PointCloud);
     pcl::PointCloud<pcl::Normal>::Ptr plane_normals(new pcl::PointCloud<pcl::Normal>());
     PointCloud::Ptr all_planar(new PointCloud);
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr all_planar_colored(new pcl::PointCloud<pcl::PointXYZRGB>);
+
+    std::vector<pcl::PointXYZ> plane_centroids;
     int plane_count = 0;
     while (cloud_filtered->points.size() > 0.5 * num_points) {
         plane_segmenter.setInputCloud(cloud_filtered);
@@ -72,62 +81,128 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
         extracter.setNegative(false);
         extracter.filter(*plane);
 
-        // TODO - filter out planar segments by normal vector. The normal should point directly toward/away from the camera
-        normal_estimator.setViewPoint(0.0f, 0.0f, 0.0f);
-        normal_estimator.setInputCloud(plane);
-        normal_estimator.setSearchMethod(kd_tree);
+        pcl::CentroidPoint<pcl::PointXYZ> curr_centroid;
+        for (int i = 0; i < plane->points.size(); i++) {
+            pcl::PointXYZRGB colored_point;
+            pcl::PointXYZ point = plane->points.at(i);
+            colored_point.x = point.x;
+            colored_point.y = point.y;
+            colored_point.z = point.z;
 
-        // What's a good search radius? Too small = lots of NaN values
-        normal_estimator.setRadiusSearch(10.0);
-        normal_estimator.compute(*plane_normals);
-
-        // plane_normals contains a normal vector for every point in the cloud
-        // try average over the entire cloud
-        pcl::CentroidPoint<pcl::Normal> avg;
-        for (int i = 0; i < plane_normals->points.size(); i++) {
-            avg.add(plane_normals->points[i]);
+            colored_point.rgb = colors[plane_count]; 
+            all_planar_colored->points.push_back(colored_point);
+            curr_centroid.add(point);
         }
-        pcl::Normal surface_normal;
-        avg.get(surface_normal);
 
-        // try filtering by planes w/ normals close to (0, 0, 1) or (0, 0, -1)?
-        // Z axis points towards/away from viewpoint
-        // normal.normal_x, normal.normal_y, normal.normal_z
-        // TODO - figure out the normal vector of planes pointing towards the viewpoint
-        /*
-        float abs_x = std::abs(surface_normal.normal_x);
-        float abs_y = std::abs(surface_normal.normal_y);
-        float abs_z = std::abs(surface_normal.normal_z);
-        std::cout << abs_x << " " << abs_y << " " << abs_z << std::endl;
-        std::cout << "-------------------------------------------------------" << std::endl;
-        if (abs_x < 0.2 && abs_y < 0.2 && abs_z > 0.8) {
-            *all_planar += *plane;
-        }
-        */
-        /*
-        if ((surface_normal.normal_x > -0.5 && surface_normal.normal_x < 0.5) &&
-            (surface_normal.normal_y > -0.5 && surface_normal.normal_y < 0.5)) {
-            if ((surface_normal.normal_z > -1.5 && surface_normal.normal_z < -0.5) ||
-                (surface_normal.normal_z > 0.5 && surface_normal.normal_z < 1.5)) {
+        auto max_x_iter = std::max_element(plane->points.begin(), plane->points.end(), 
+                                           [](pcl::PointXYZ a, pcl::PointXYZ b) -> bool
+                                           {
+                                                return a.x < b.x;
+                                           });
+        auto  max_y_iter = std::max_element(plane->points.begin(), plane->points.end(), 
+                                            [](pcl::PointXYZ a, pcl::PointXYZ b) -> bool
+                                            {
+                                                 return a.y < b.y;
+                                            });
+        auto min_x_iter = std::min_element(plane->points.begin(), plane->points.end(), 
+                                           [](pcl::PointXYZ a, pcl::PointXYZ b) -> bool
+                                           {
+                                                return a.x < b.x;
+                                           });
+        auto min_y_iter = std::min_element(plane->points.begin(), plane->points.end(), 
+                                           [](pcl::PointXYZ a, pcl::PointXYZ b) -> bool
+                                           {
+                                                return a.y < b.y;
+                                           });
+        
+        pcl::PointXYZ centroid_point;
+        curr_centroid.get(centroid_point);
+        bool result = false;
+        for (int i = 0; i < centroid_buffer.size(); i++) {
+            for (int j = 0; j < centroid_buffer[i].size(); j++) {
+                pcl::PointXYZ prev_point = centroid_buffer[i][j];
+                double squ_dist = std::pow((centroid_point.x - prev_point.x), 2) +
+                                  std::pow((centroid_point.y - prev_point.y), 2) + 
+                                  std::pow((centroid_point.z - prev_point.z), 2);
 
-                std::cout << "good" << std::endl;
-                // add this plane to all planes
-                *all_planar += *plane;
+                if (std::sqrt(squ_dist) < 1.0) {
+                    result = true;
+                    break;
+                }
             }
         }
-        */
+           
+
+        ROS_INFO("Plane size: %lu; Deviation = %lf", plane->points.size(), get_deviation(plane, coefficients));
+        double area = ((*max_x_iter).x - (*min_x_iter).x) * ((*max_y_iter).y - (*min_y_iter).y);
+        std::cout << "Area is: " << area << std::endl;
         
-        std::cout << plane->points.size() << std::endl;
-        if (plane->points.size() > 200) {
+        double density = double(plane->points.size()) / area;
+        std::cout << "Density is: " << density << std::endl;
+
+        if (density > 70 && result || centroid_buffer.size() == 0) {
+            plane_count++;
+            plane_centroids.push_back(centroid_point);
             *all_planar += *plane;
         }
 
         extracter.setNegative(true);
         extracter.filter(*removed);
         cloud_filtered.swap(removed);
+        plane_count++;
+    }
+
+    centroid_buffer.push_back(plane_centroids);
+    if (centroid_buffer.size() > 3) {
+        centroid_buffer.pop_front();
     }
     std::cout << "-----------------------------------Plane count is: " << plane_count << std::endl;
     all_planar->header.frame_id = "guidance";
     pcl_conversions::toPCL(ros::Time::now(), all_planar->header.stamp);
     plane_pointcloud_pub.publish(all_planar);
+
+    all_planar_colored->header.frame_id = "guidance";
+    pcl_conversions::toPCL(ros::Time::now(), all_planar_colored->header.stamp);
+    colored_plane_pub.publish(all_planar_colored);
+}
+
+double PlaneSegmentation::get_deviation(const PointCloud::Ptr& pointcloud,
+                                        const pcl::ModelCoefficients::Ptr& coefficients) {
+
+    std::vector<double> errors;
+    double mean_error = 0;
+    double min_error = 100000;
+    double max_error = 0;
+    for (int i = 0; i < pointcloud->points.size(); i++) {
+        // get point
+        pcl::PointXYZ point = pointcloud->points.at(i);
+
+        // compute distance
+        double c1 = coefficients->values[0];
+        double c2 = coefficients->values[1];
+        double c3 = coefficients->values[2];
+        double c4 = coefficients->values[3];
+
+        double d = pcl::pointToPlaneDistance<pcl::PointXYZ>(point, c1, c2, c3, c4); // in meters
+        //std::cout << point << std::endl;
+        //ROS_INFO("Distance to plane: %lf", d);
+
+        // update statistics
+        errors.push_back(d);
+        mean_error += d;
+        if (d > max_error) {
+            max_error = d;
+        }
+        if (d < min_error) {
+            min_error = d;
+        }
+    }
+    mean_error /= pointcloud->points.size();
+
+    double deviation = 0;
+    for (int i = 0; i < pointcloud->points.size(); i++) {
+        deviation += std::pow(errors[i] - mean_error, 2);
+    }
+
+    return std::sqrt(deviation / pointcloud->points.size());
 }
