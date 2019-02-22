@@ -10,12 +10,12 @@ int main(int argc, char **argv) {
 }
 
 PlaneSegmentation::PlaneSegmentation(void) : 
-    nh(), 
-    kd_tree(new pcl::search::KdTree<pcl::PointXYZ>()) 
+    nh()
 {
     // TODO - boost shit to bind class to callback
     pointcloud_sub = nh.subscribe<PointCloud>("/guidance/points2", 1, &PlaneSegmentation::pointcloud_callback, this);
     plane_pointcloud_pub = nh.advertise<PointCloud>("/guidance/filtered_points", 1);
+    mesh_pub = nh.advertise<PointCloud>("/guidance/mesh_pub", 1);
     colored_plane_pub = nh.advertise<pcl::PointCloud<pcl::PointXYZRGB>>("/guidance/planes_colored", 1);
 
     // voxel filter settings
@@ -56,7 +56,6 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
     // convert to PointCloud
     pcl::fromPCLPointCloud2(*filtered_cloud2, *cloud_filtered);
 
-    // do plane segmentation
     pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inliers(new pcl::PointIndices); 
     
@@ -68,6 +67,8 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
     std::vector<pcl::PointXYZ> plane_centroids;
     int plane_count = 0;
     while (cloud_filtered->points.size() > 0.5 * num_points) {
+
+        // get plane model
         plane_segmenter.setInputCloud(cloud_filtered);
         plane_segmenter.segment(*inliers, *coefficients);
         if (inliers->indices.size() == 0) {
@@ -85,16 +86,18 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
         double density = double(plane->points.size()) / rect_area;
 
         // Try to find surface area of the pointcloud
+        double surface_area = get_surface_area(plane);
         
         // dump info to console
         std::cout << "-----------------NEW PLANE: " << plane_count << " ---------------" << std::endl;
         std::cout << "Plane size: " <<  plane->points.size() << std::endl;
-        std::cout << "Area is: " << rect_area << std::endl;
+        std::cout << "Rectangular Area is: " << rect_area << std::endl;
         std::cout << "Density is: " << density << std::endl;
-         
+        std::cout << "Surface area is: " << surface_area << std::endl;
+
         // Filter by density and comparison to previous centroids
         pcl::PointXYZ centroid_point = compute_centroid(plane);
-        if (density > 70 && near_previous_centroid(centroid_point) || centroid_buffer.size() == 0) {
+        if (surface_area > 0.75 && near_previous_centroid(centroid_point) || centroid_buffer.size() == 0) {
             std::cout << "**************PUBLISHED**************" << std::endl;
             plane_count++;
             plane_centroids.push_back(centroid_point);
@@ -176,6 +179,7 @@ bool PlaneSegmentation::near_previous_centroid(const pcl::PointXYZ& centroid_poi
     // compare the centroid of the current cloud to centroids in the buffer. 
     // Only consider this plane if it's centroid was close (<1m) from a centroid seen within the last 3 frames 
     bool result = false;
+    int count = 0;
     for (int i = 0; i < centroid_buffer.size(); i++) {
         for (int j = 0; j < centroid_buffer[i].size(); j++) {
             pcl::PointXYZ prev_point = centroid_buffer[i][j];
@@ -259,6 +263,102 @@ double PlaneSegmentation::get_deviation(const PointCloud::Ptr& pointcloud,
     }
 
     return std::sqrt(deviation / pointcloud->points.size());
+}
+
+double PlaneSegmentation::get_surface_area(const PointCloud::Ptr& pointcloud) {
+    pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normal_estimator;
+    pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr kd_tree(new pcl::search::KdTree<pcl::PointXYZ>);
+
+    // First, estimate normals
+    kd_tree->setInputCloud(pointcloud);
+    normal_estimator.setInputCloud(pointcloud);
+    normal_estimator.setSearchMethod(kd_tree);
+    normal_estimator.setKSearch(20);
+    normal_estimator.compute(*normals);
+
+    // concatenate XYZ and normal fields
+    pcl::PointCloud<pcl::PointNormal>::Ptr cloud_with_normals(new pcl::PointCloud<pcl::PointNormal>);
+    pcl::concatenateFields(*pointcloud, *normals, *cloud_with_normals);
+
+    // initialize search tree and objects for greedy triangulation
+    pcl::search::KdTree<pcl::PointNormal>::Ptr normal_kd_tree(new pcl::search::KdTree<pcl::PointNormal>);
+    normal_kd_tree->setInputCloud(cloud_with_normals);
+    pcl::GreedyProjectionTriangulation<pcl::PointNormal> greedy_projection;
+    pcl::PolygonMesh triangles;
+
+    // greedy projection parameters
+    greedy_projection.setSearchRadius(0.25);
+    greedy_projection.setMu(2.5);
+    greedy_projection.setMaximumNearestNeighbors(100);
+    greedy_projection.setMaximumSurfaceAngle(M_PI / 4);
+    greedy_projection.setMinimumAngle(M_PI/18);
+    greedy_projection.setMaximumAngle(2 * M_PI / 3);
+    greedy_projection.setNormalConsistency(false);
+
+    greedy_projection.setInputCloud(cloud_with_normals);
+    greedy_projection.setSearchMethod(normal_kd_tree);
+    greedy_projection.reconstruct(triangles);
+
+    // convert mesh to pointcloud
+
+    // publish mesh_pub for debug
+    /*
+    mesh_cloud->header.frame_id = "guidance";
+    pcl_conversions::toPCL(ros::Time::now(), mesh_cloud->header.stamp);
+    mesh_pub.publish(mesh_cloud);
+    */
+    return find_polygon_area(pointcloud, triangles);
+ }
+
+double PlaneSegmentation::find_polygon_area(const PointCloud::Ptr& cloud, const pcl::PolygonMesh& mesh) {
+   // then calculate the area of the mesh cloud
+   /*
+    double area = 0.0;
+    int num_points = pointcloud->points.size();
+    int j = 0;
+    Eigen::Vector3f va, vb, res; 
+    res(0) = res(1) = res(2) = 0.0f;
+
+    for (int i = 0; i < num_points; ++i) {
+        j = (i + 1) % num_points;
+        va = pointcloud->points.at(i).getVector3fMap();
+        vb = pointcloud->points.at(j).getVector3fMap();
+        res += va.cross(vb);
+    }
+    area = res.norm();
+    return area * 0.5;
+    */
+    int index1, index2, index3;
+    double x1, x2, x3, y1, y2, y3, z1, z2, z3;
+    double a, b, c, q;
+    double area = 0;
+    for (int i = 0; i < mesh.polygons.size(); ++i) {
+        index1 = mesh.polygons[i].vertices[0];
+        index2 = mesh.polygons[i].vertices[1];
+        index3 = mesh.polygons[i].vertices[2];
+        
+        x1 = cloud->points[index1].x;
+        y1 = cloud->points[index1].y;
+        z1 = cloud->points[index1].z;
+
+        x2 = cloud->points[index2].x;
+        y2 = cloud->points[index2].y;
+        z2 = cloud->points[index2].z;
+
+        x3 = cloud->points[index3].x;
+        y3 = cloud->points[index3].y;
+        z3 = cloud->points[index3].z;
+
+        // heron's formula
+        a=sqrt(std::pow((x1-x2),2)+std::pow((y1-y2),2)+std::pow((z1-z2),2));
+        b=sqrt(std::pow((x1-x3),2)+std::pow((y1-y3),2)+std::pow((z1-z3),2));
+        c=sqrt(std::pow((x3-x2),2)+std::pow((y3-y2),2)+std::pow((z3-z2),2));
+        q=(a+b+c)/2;
+
+        area=area+std::sqrt(q*(q-a)*(q-b)*(q-c));
+    }
+    return area;
 }
 
 PointCloud::Ptr PlaneSegmentation::extract_cloud(const PointCloud::Ptr& pointcloud,

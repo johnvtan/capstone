@@ -16,6 +16,8 @@
 #include <pcl/filters/extract_indices.h>
 #include <pcl/features/normal_3d.h>
 #include <pcl/common/geometry.h>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/surface/gp3.h>
 
 #include <string>
 #include <deque>
@@ -39,7 +41,8 @@ private:
     double get_deviation(const PointCloud::Ptr& pointcloud,
                          const pcl::ModelCoefficients::Ptr& coefficients,
                          double* mean_error);
-
+    double get_surface_area(const PointCloud::Ptr& pointcloud);
+    double find_polygon_area(const PointCloud::Ptr& pointcloud, const pcl::PolygonMesh& polygons);
     PointCloud::Ptr extract_cloud(const PointCloud::Ptr& pointcloud, const pcl::PointIndices::Ptr& indices, bool remove);
 
     uint32_t colors[100];
@@ -49,11 +52,9 @@ private:
     ros::Subscriber pointcloud_sub;
     ros::Publisher plane_pointcloud_pub;
     ros::Publisher colored_plane_pub;
+    ros::Publisher mesh_pub;
 
     pcl::VoxelGrid<pcl::PCLPointCloud2> voxel_filter;
     pcl::SACSegmentation<pcl::PointXYZ> plane_segmenter;
-    pcl::ExtractIndices<pcl::PointXYZ> extracter;
-    pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normal_estimator;
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr kd_tree;
 };
 #endif
