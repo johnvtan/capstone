@@ -18,11 +18,17 @@
 #include <pcl/common/geometry.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/surface/gp3.h>
+#include <pcl/filters/statistical_outlier_removal.h>
 
 #include <string>
 #include <deque>
 
 typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
+
+struct plane_probability {
+    pcl::PointXYZ centroid;
+    double probability;
+};
 
 class PlaneSegmentation 
 {
@@ -32,6 +38,7 @@ public:
     void run(void);
 private:
     void pointcloud_callback(const PointCloud::ConstPtr& msg);
+    PointCloud::Ptr remove_outliers(const PointCloud::Ptr& pointcloud);
     pcl::PointXYZ compute_centroid(const PointCloud::Ptr& pointcloud);
     double get_rectangular_area(const PointCloud::Ptr& pointcloud);
     bool near_previous_centroid(const pcl::PointXYZ& centroid_point);
@@ -41,12 +48,18 @@ private:
     double get_deviation(const PointCloud::Ptr& pointcloud,
                          const pcl::ModelCoefficients::Ptr& coefficients,
                          double* mean_error);
+    double get_planar_probability(const pcl::PointXYZ& centroid_point);
     double get_surface_area(const PointCloud::Ptr& pointcloud);
     double find_polygon_area(const PointCloud::Ptr& pointcloud, const pcl::PolygonMesh& polygons);
     PointCloud::Ptr extract_cloud(const PointCloud::Ptr& pointcloud, const pcl::PointIndices::Ptr& indices, bool remove);
+    double get_depth_confidence_score(const pcl::PointXYZ& point, double max_distance, double min_distance);
+    double get_flatness_score(const PointCloud::Ptr& pointcloud, const pcl::ModelCoefficients::Ptr coefficients);
+    double get_steepness_score(const PointCloud::Ptr& pointcloud);
 
     uint32_t colors[100];
     std::deque< std::vector<pcl::PointXYZ>> centroid_buffer;
+    std::vector<struct plane_probability> plane_probabilities;
+
     int frame_count;
     ros::NodeHandle nh;
     ros::Subscriber pointcloud_sub;
