@@ -30,6 +30,12 @@ struct plane_probability {
     double probability;
 };
 
+struct persistent_plane {
+    pcl::PointXYZ centroid;
+    PointCloud::Ptr plane;
+    int lifespan;
+};
+
 class PlaneSegmentation 
 {
 public:
@@ -41,7 +47,7 @@ private:
     PointCloud::Ptr remove_outliers(const PointCloud::Ptr& pointcloud);
     pcl::PointXYZ compute_centroid(const PointCloud::Ptr& pointcloud);
     double get_rectangular_area(const PointCloud::Ptr& pointcloud);
-    bool near_previous_centroid(const pcl::PointXYZ& centroid_point);
+    bool near_previous_centroid(const pcl::PointXYZ& centroid_point, const PointCloud::Ptr& pointcloud);
     PointCloud::Ptr filter_by_std_dev(const PointCloud::Ptr& pointcloud,
                                       const pcl::ModelCoefficients::Ptr coefficients,
                                       unsigned int num_dev);
@@ -52,13 +58,19 @@ private:
     double get_surface_area(const PointCloud::Ptr& pointcloud);
     double find_polygon_area(const PointCloud::Ptr& pointcloud, const pcl::PolygonMesh& polygons);
     PointCloud::Ptr extract_cloud(const PointCloud::Ptr& pointcloud, const pcl::PointIndices::Ptr& indices, bool remove);
-    double get_depth_confidence_score(const pcl::PointXYZ& point, double max_distance, double min_distance);
-    double get_flatness_score(const PointCloud::Ptr& pointcloud, const pcl::ModelCoefficients::Ptr coefficients);
-    double get_steepness_score(const PointCloud::Ptr& pointcloud);
+
+    double get_depth_confidence_score(const PointCloud::Ptr pointcloud, double max_distance, double min_distance,
+                                      double& min_depth_confidence_score, double& max_depth_confidence_score);
+    double get_flatness_score(const PointCloud::Ptr& pointcloud, const pcl::ModelCoefficients::Ptr coefficients,
+                              double& min_distance, double& max_distance);
+    double get_steepness_score(const PointCloud::Ptr& pointcloud, double& min_score, double& max_score);
+
+    PointCloud::Ptr downsample_organized(const PointCloud::ConstPtr& pointcloud, int scale);
 
     uint32_t colors[100];
     std::deque< std::vector<pcl::PointXYZ>> centroid_buffer;
     std::vector<struct plane_probability> plane_probabilities;
+    std::vector<struct persistent_plane> existing_planes;
 
     int frame_count;
     ros::NodeHandle nh;

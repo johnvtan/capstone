@@ -14,7 +14,7 @@ PlaneSegmentation::PlaneSegmentation(void) :
     nh()
 {
     // TODO - boost shit to bind class to callback
-    pointcloud_sub = nh.subscribe<PointCloud>("/guidance/points2", 1, &PlaneSegmentation::pointcloud_callback, this);
+    pointcloud_sub = nh.subscribe<PointCloud>("/camera/depth/points", 1, &PlaneSegmentation::pointcloud_callback, this);
     plane_pointcloud_pub = nh.advertise<PointCloud>("/guidance/filtered_points", 1);
     mesh_pub = nh.advertise<PointCloud>("/guidance/mesh_pub", 1);
     colored_plane_pub = nh.advertise<pcl::PointCloud<pcl::PointXYZRGB>>("/guidance/planes_colored", 1);
@@ -47,6 +47,9 @@ void PlaneSegmentation::run(void) {
 void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg) 
 {
     PointCloud::Ptr cloud_filtered(new PointCloud);
+    if (msg->points.size() == 0) {
+        return;
+    }
     pcl::PCLPointCloud2::Ptr cloud2(new pcl::PCLPointCloud2), filtered_cloud2(new pcl::PCLPointCloud2);
     pcl::toPCLPointCloud2(*msg, *cloud2);
 
@@ -55,7 +58,17 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
 
     // convert to PointCloud
     pcl::fromPCLPointCloud2(*filtered_cloud2, *cloud_filtered);
+    /*
+    PointCloud::Ptr cloud_filtered = downsample_organized(msg, 4);
+    */
 
+    cloud_filtered->header.frame_id = msg->header.frame_id;
+    pcl_conversions::toPCL(ros::Time::now(), cloud_filtered->header.stamp);
+    mesh_pub.publish(cloud_filtered);
+
+    if (cloud_filtered->points.size() == 0) {
+        return;
+    }
     pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inliers(new pcl::PointIndices); 
     
@@ -80,6 +93,15 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
     double max_distance = max_distance_pt.z;
     double min_distance = min_distance_pt.z;
 
+    double min_depth_score = 100000.0;
+    double max_depth_score = 0.0;
+
+    double min_flatness_score = 100000.0;
+    double max_flatness_score = 0.0;
+
+    double min_steepness_score = 100000.0;
+    double max_steepness_score = 0.0;
+
     int count = 0;
     std::vector<double> depth_scores;
     std::vector<double> flatness_scores; 
@@ -103,15 +125,13 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
         PointCloud::Ptr plane = remove_outliers(plane_raw);
         extracted_planes.push_back(plane);
 
-        // get depth confidence score of centroid as like an average
-        pcl::PointXYZ centroid_point = compute_centroid(plane);
+        pcl::PointXYZ centroid = compute_centroid(plane);
+        double depth_confidence_score = get_depth_confidence_score(plane, max_distance, min_distance,
+                                                                   min_depth_score, max_depth_score);
 
-        std::cout << "plane # " << count++ << std::endl;
-        double depth_confidence_score = get_depth_confidence_score(centroid_point, max_distance, min_distance);
+        double flatness_score = get_flatness_score(plane, coefficients, min_flatness_score, max_flatness_score);
 
-        double flatness_score = get_flatness_score(plane, coefficients);
-
-        double steepness_score = get_steepness_score(plane);
+        double steepness_score = get_steepness_score(plane, min_steepness_score, max_steepness_score);
         depth_scores.push_back(depth_confidence_score);
         flatness_scores.push_back(flatness_score);
         steepness_scores.push_back(steepness_score);
@@ -120,20 +140,6 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
         removed = extract_cloud(cloud_filtered, inliers, true);
         cloud_filtered.swap(removed);
     }
-
-    if (extracted_planes.size() == 0) {
-        return;
-    }
-
-    // find min and max values in all the scores
-    double max_depth_score = *std::max_element(depth_scores.begin(), depth_scores.end());
-    double min_depth_score = *std::min_element(depth_scores.begin(), depth_scores.end());
-
-    double max_flatness_score = *std::max_element(flatness_scores.begin(), flatness_scores.end());
-    double min_flatness_score = *std::min_element(flatness_scores.begin(), flatness_scores.end());
-
-    double max_steepness_score = *std::max_element(steepness_scores.begin(), steepness_scores.end());
-    double min_steepness_score = *std::min_element(steepness_scores.begin(), steepness_scores.end());
 
     for (int i = 0; i < extracted_planes.size(); i++) {
         PointCloud::Ptr plane = extracted_planes.at(i);
@@ -155,15 +161,61 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
         // Can use surface area as a score as well potentially
         
         pcl::PointXYZ centroid_point = compute_centroid(plane);
-        //bool near_prev = near_previous_centroid(centroid_point);
+        //bool near_prev = near_previous_centroid(centroid_point, plane);
         bool near_prev = true;
         
         double depth_confidence_score = (depth_scores.at(i) - min_depth_score) / (max_depth_score - min_depth_score);
         double flatness_score = 1 - (flatness_scores.at(i) - min_flatness_score) / (max_flatness_score - min_flatness_score);
         //double flatness_score = 1 - flatness_scores.at(i) / max_flatness_score;
-        double steepness_score = (steepness_scores.at(i) - min_steepness_score) / (max_steepness_score - min_steepness_score);
-        double total_score = 0.2 * depth_confidence_score + 0.4 * flatness_score + 0.4 * steepness_score;
-        
+        double steepness_score = steepness_scores.at(i);
+        double total_score = 0.1 * depth_confidence_score + 0.5 * flatness_score + 0.4 * steepness_score;
+
+        double min_x = 10000.0;
+        double max_x = -10000.0;
+        double min_y = 10000.0;
+        double max_y = -10000.0;
+        for (int i = 0; i < plane->points.size(); i++) {
+            pcl::PointXYZ point = plane->points[i];
+            if (point.x < min_x) {
+                min_x = point.x;
+            }
+            if (point.x > max_x) {
+                max_x = point.x;
+            }
+            if (point.y < min_y) {
+                min_y = point.y;
+            }
+            if (point.y > max_y) {
+                max_y = point.y;
+            }
+        }
+/*
+        double min_x =  (*std::min_element(plane->points.begin(), plane->points.end(), 
+                                           [](pcl::PointXYZ a, pcl::PointXYZ b) -> bool
+                                           {
+                                                return a.x < b.x;
+                                           })).x;
+        double max_x =  (*std::max_element(plane->points.begin(), plane->points.end(), 
+                                           [](pcl::PointXYZ a, pcl::PointXYZ b) -> bool
+                                           {
+                                                return a.x < b.x;
+                                           })).x;
+
+        double min_y =  (*std::min_element(plane->points.begin(), plane->points.end(), 
+                                           [](pcl::PointXYZ a, pcl::PointXYZ b) -> bool
+                                           {
+                                                return a.y < b.y;
+                                           })).y;
+
+        double max_y =  (*std::max_element(plane->points.begin(), plane->points.end(), 
+                                           [](pcl::PointXYZ a, pcl::PointXYZ b) -> bool
+                                           {
+                                                return a.y < b.y;
+                                           })).y;
+
+       */ 
+        bool wide_enough = (max_x - min_x) > 0.6;
+        bool long_enough = (max_y - min_y) > 0.6;
         // dump info to console
         std::cout << "-----------------NEW PLANE: " << plane_count << " ---------------" << std::endl;
         std::cout << "Plane size: " <<  plane->points.size() << std::endl;
@@ -175,13 +227,23 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
         std::cout << "Flatness score: " << flatness_score << std::endl;
         std::cout << "Steepness score: " << steepness_score << std::endl;
         std::cout << "Total score: " << total_score << std::endl;
+        std::cout << "Wide enough? " << wide_enough << std::endl;
+        std::cout << "Long enough? " << long_enough << std::endl;
+
 
         // Filter by density and comparison to previous centroids
-        if (total_score > 0.75 && surface_area > 0.75) {
-            std::cout << "**************PUBLISHED**************" << std::endl;
-            plane_count++;
-            plane_centroids.push_back(centroid_point);
+        if (total_score > 0.7 && surface_area > 0.75 && long_enough && wide_enough && density > 50) {
+            /*
+            if (!near_prev) {
+                struct persistent_plane new_plane;
+                new_plane.plane = plane;
+                new_plane.centroid = centroid_point;
+                new_plane.lifespan = 5;
+                existing_planes.push_back(new_plane);
+            }
+            */
             *all_planar += *plane;
+            std::cout << "**************PUBLISHED**************" << std::endl;
         }
 
         plane_count++;
@@ -200,19 +262,34 @@ void PlaneSegmentation::pointcloud_callback(const PointCloud::ConstPtr& msg)
 
     }
 
-    centroid_buffer.push_back(plane_centroids);
-    if (centroid_buffer.size() > 3) {
-        centroid_buffer.pop_front();
+    // purge dead planes, decrement lifespans of existing ones
+    /*
+    std::vector<struct persistent_plane>::iterator iter;
+    for (iter = existing_planes.begin(); iter != existing_planes.end(); ) {
+        if (iter->lifespan == 0) {
+            iter = existing_planes.erase(iter);
+        } else {
+            iter->lifespan--;
+            ++iter;
+        }
     }
+    for (int i = 0; i < existing_planes.size(); i++) {
+        *all_planar += *existing_planes[i].plane;
+    }
+    */
+    if (all_planar->points.size() > 0) {
 
-    all_planar_colored->header.frame_id = "guidance";
-    pcl_conversions::toPCL(ros::Time::now(), all_planar_colored->header.stamp);
-    colored_plane_pub.publish(all_planar_colored);
+        /*
+        all_planar_colored->header.frame_id = "guidance";
+        pcl_conversions::toPCL(ros::Time::now(), all_planar_colored->header.stamp);
+        colored_plane_pub.publish(all_planar_colored);
+        */
 
-    std::cout << "-----------------------------------Plane count is: " << plane_count << std::endl;
-    all_planar->header.frame_id = "guidance";
-    pcl_conversions::toPCL(ros::Time::now(), all_planar->header.stamp);
-    plane_pointcloud_pub.publish(all_planar);
+        std::cout << "-----------------------------------Plane count is: " << plane_count << std::endl;
+        all_planar->header.frame_id = msg->header.frame_id;
+        pcl_conversions::toPCL(ros::Time::now(), all_planar->header.stamp);
+        plane_pointcloud_pub.publish(all_planar);
+    }
 }
 
 PointCloud::Ptr PlaneSegmentation::remove_outliers(const PointCloud::Ptr& pointcloud) {
@@ -263,23 +340,23 @@ double PlaneSegmentation::get_rectangular_area(const PointCloud::Ptr& pointcloud
     return ((*max_x_iter).x - (*min_x_iter).x) * ((*max_y_iter).y - (*min_y_iter).y);
 }
 
-bool PlaneSegmentation::near_previous_centroid(const pcl::PointXYZ& centroid_point) {
+bool PlaneSegmentation::near_previous_centroid(const pcl::PointXYZ& centroid_point, const PointCloud::Ptr& pointcloud) {
     // compare the centroid of the current cloud to centroids in the buffer. 
     // Only consider this plane if it's centroid was close (<1m) from a centroid seen within the last 3 frames 
     bool result = false;
     int count = 0;
-    for (int i = 0; i < centroid_buffer.size(); i++) {
-        for (int j = 0; j < centroid_buffer[i].size(); j++) {
-            pcl::PointXYZ prev_point = centroid_buffer[i][j];
-            double squ_dist = std::pow((centroid_point.x - prev_point.x), 2) +
-                              std::pow((centroid_point.y - prev_point.y), 2) + 
-                              std::pow((centroid_point.z - prev_point.z), 2);
+    for (int i = 0; i < existing_planes.size(); i++) {
+       pcl::PointXYZ prev_point = existing_planes.at(i).centroid;
+       double squ_dist = std::pow((centroid_point.x - prev_point.x), 2) +
+                         std::pow((centroid_point.y - prev_point.y), 2) + 
+                         std::pow((centroid_point.z - prev_point.z), 2);
 
-            if (std::sqrt(squ_dist) < 1.0) {
-                result = true;
-                break;
-            }
-        }
+       if (std::sqrt(squ_dist) < 1.0) {
+           existing_planes.at(i).plane = pointcloud;
+           existing_planes.at(i).lifespan = 5;
+           result = true;
+           break;
+       }
     }
     return result;
 }
@@ -463,11 +540,30 @@ PointCloud::Ptr PlaneSegmentation::extract_cloud(const PointCloud::Ptr& pointclo
     return return_cloud;
 }
 
-double PlaneSegmentation::get_depth_confidence_score(const pcl::PointXYZ& point, double max_distance, double min_distance) {
-    return 1 - ((std::pow(point.z, 2) - std::pow(min_distance, 2)) / (std::pow(max_distance, 2))); 
+double PlaneSegmentation::get_depth_confidence_score(const PointCloud::Ptr pointcloud, double max_distance, double min_distance,
+                                                     double& min_depth_confidence_score, double& max_depth_confidence_score) {
+
+    double average_score = 0.0;
+    int count = 0;
+    for (int i = 0; i < pointcloud->points.size(); i++) {
+        pcl::PointXYZ point = pointcloud->points.at(i);
+        if (!std::isnan(point.z)) {
+            double score = 1 - ((std::pow(point.z, 2) - std::pow(min_distance, 2)) / (std::pow(max_distance, 2)));
+            average_score += score;
+            count++;
+            if (score < min_depth_confidence_score) {
+                min_depth_confidence_score = score;
+            }
+            if (score > max_depth_confidence_score) {
+                max_depth_confidence_score = score;
+            }
+        }
+    }
+    return average_score / count; 
 }
 
-double PlaneSegmentation::get_flatness_score(const PointCloud::Ptr& pointcloud, const pcl::ModelCoefficients::Ptr coefficients) {
+double PlaneSegmentation::get_flatness_score(const PointCloud::Ptr& pointcloud, const pcl::ModelCoefficients::Ptr coefficients,
+                                             double& min_distance, double& max_distance) {
     double mean_distance = 0;
     for (int i = 0; i < pointcloud->points.size(); i++) {
         // get point
@@ -482,6 +578,14 @@ double PlaneSegmentation::get_flatness_score(const PointCloud::Ptr& pointcloud, 
         double d = pcl::pointToPlaneDistance<pcl::PointXYZ>(point, c1, c2, c3, c4); // in meters
         //std::cout << point << std::endl;
         //ROS_INFO("Distance to plane: %lf", d);
+        
+        if (d < min_distance) {
+            min_distance = d;
+        }
+
+        if (d > max_distance) {
+            max_distance = d;
+        }
 
         mean_distance += d;
     }
@@ -490,7 +594,7 @@ double PlaneSegmentation::get_flatness_score(const PointCloud::Ptr& pointcloud, 
 }
 
 // TODO not really working? Figure out why later
-double PlaneSegmentation::get_steepness_score(const PointCloud::Ptr& pointcloud) {
+double PlaneSegmentation::get_steepness_score(const PointCloud::Ptr& pointcloud, double& min_score, double& max_score) {
     pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
     pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>());
     ne.setRadiusSearch(0.5);
@@ -512,12 +616,31 @@ double PlaneSegmentation::get_steepness_score(const PointCloud::Ptr& pointcloud)
             }
             // use curvature?
             double theta = acos(z_component);
-            double curr_score = exp(-1 * std::pow(theta, 2) / (2 * std::pow(15, 2)));
+            double curr_score = exp(-1 * std::pow(theta, 2) / (2 * std::pow(10, 2)));
+            if (curr_score < min_score) {
+                min_score = curr_score;
+            }
+            if (curr_score > max_score) {
+                max_score = curr_score;
+            }
             avg_theta += theta;
             avg_steepness_score += curr_score;
             count++;
         }
     }
-    std::cout << "Theta: " << avg_theta / count << " avg score: " << avg_steepness_score / count << std::endl;
     return avg_steepness_score / count;
+}
+
+PointCloud::Ptr PlaneSegmentation::downsample_organized(const PointCloud::ConstPtr& pointcloud, int scale) {
+    PointCloud::Ptr downsampled_cloud(new PointCloud);
+    downsampled_cloud->width = pointcloud->width / scale;
+    downsampled_cloud->height = pointcloud->height / scale;
+    downsampled_cloud->points.resize(downsampled_cloud->width * downsampled_cloud->height);
+
+    for (int i = 0, ii = 0; i < downsampled_cloud->height; i++, ii += scale) {
+        for (int j = 0, jj = 0; j < downsampled_cloud->width; j++, j+= scale) {
+            downsampled_cloud->at(j, i) = pointcloud->at(jj, ii);
+        }
+    }
+    return downsampled_cloud;
 }
